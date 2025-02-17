@@ -1,74 +1,78 @@
-import rasterio
+import sys
+import os
+import subprocess
+from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.widgets import Cursor
 from tkinter import Tk, filedialog, Frame, Listbox, Scrollbar, Button as TkButton
 import tkinter as tk
-import os
 import datetime
-import sys
-import subprocess
 
-# Ensure the script's directory is the working directory
-script_dir = os.path.dirname(os.path.abspath(__file__))
-os.chdir(script_dir)
+# Relaunch as a hidden process if running as .py (Windows only)
+if sys.platform == "win32" and sys.argv[0].endswith(".py"):
+    script_path = os.path.abspath(sys.argv[0])
+    if not sys.executable.endswith("pythonw.exe"):  # Prevent infinite loop
+        subprocess.Popen(["pythonw", script_path], close_fds=True, creationflags=subprocess.DETACHED_PROCESS)
+        sys.exit()
 
-# Hide the CMD window on Windows when running as a script
-def hide_cmd_window():
-    if os.name == 'nt' and sys.stdout is not None:  # Running in a visible CMD window
-        script = os.path.abspath(sys.argv[0])
-        subprocess.Popen(["pythonw", script], close_fds=True, creationflags=subprocess.DETACHED_PROCESS)
-        sys.exit()  # Exit the current CMD process
-
-hide_cmd_window()  # Call the function at the start
-
-# Ensure all required rasterio modules are included for PyInstaller
-import rasterio.vrt
-import rasterio.sample
-import rasterio.windows
+# Set new map size
+MAP_SIZE = 276480  # Updated from 250000
 
 # List to store clicked points
 clicked_points = []
-# Variables for panning
-pan_start = None
 
-def load_tif():
+# Load WebP Image
+def load_webp():
     root = Tk()
     root.withdraw()
-    file_path = filedialog.askopenfilename(title="Select TIF Image", filetypes=[("TIFF Files", "*.tif;*.tiff")])
+    file_path = filedialog.askopenfilename(title="Select WebP Image", filetypes=[("WebP Files", "*.webp")])
     return file_path
 
+# Update image in the GUI
 def update_image():
-    global image, transform, ax, canvas
-    tif_path = load_tif()
-    if tif_path:
-        with rasterio.open(tif_path) as dataset:
-            image = dataset.read(1)
-            transform = dataset.transform
-        
+    global image, img_array, ax, canvas
+    img_path = load_webp()
+    if img_path:
+        image = Image.open(img_path).convert("L")  # Convert to grayscale
+        img_array = np.array(image)
         ax.clear()
-        ax.imshow(image, cmap='gray', extent=[0, image.shape[1], image.shape[0], 0])
+        ax.imshow(img_array, cmap='gray', extent=[0, img_array.shape[1], img_array.shape[0], 0])
         ax.set_title("Hover to See Coordinates")
         canvas.draw()
 
-def pixel_to_world(x, y, transform):
-    world_x, world_y = transform * (x, y)
+# Convert pixel to world coordinates
+def pixel_to_world(x, y):
+    scale_x = 276480 / 1493
+    scale_y = 276480 / 1493
+    world_x = (x - img_array.shape[1] / 2) * scale_x
+    world_y = (y - img_array.shape[0] / 2) * scale_y  # Flip Y-axis
     return world_x, world_y
 
+# Handle mouse clicks
 def on_click(event):
-    if event.button == 1 and event.xdata is not None and event.ydata is not None and 'image' in globals():
+    if event.button == 1 and event.xdata is not None and event.ydata is not None:
         x, y = int(event.xdata), int(event.ydata)
-        if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-            world_x, world_y = pixel_to_world(x, y, transform)
-            world_y = -world_y  # Flip Y coordinate
+        if 0 <= x < img_array.shape[1] and 0 <= y < img_array.shape[0]:
+            world_x, world_y = pixel_to_world(x, y)
             clicked_points.append((world_x, world_y))
-            ax.plot(x, y, 'ro')  # Mark clicked point on the image
+            ax.plot(x, y, 'ro')
             canvas.draw()
             listbox.insert(tk.END, f"({world_x:.2f}, {world_y:.2f})")
 
+# Handle mouse hover
+def on_hover(event):
+    if event.xdata is not None and event.ydata is not None:
+        x, y = int(event.xdata), int(event.ydata)
+        if 0 <= x < img_array.shape[1] and 0 <= y < img_array.shape[0]:
+            world_x, world_y = pixel_to_world(x, y)
+            ax.set_title(f"World Coordinates: ({world_x:.2f}, {world_y:.2f})")
+            canvas.draw()
+
+# Handle zooming
 def zoom(event):
-    scale_factor = 1.2 if event.step > 0 else 0.8  # Adjust zoom based on scroll direction
+    scale_factor = 1.2 if event.step > 0 else 0.8
     xlim = ax.get_xlim()
     ylim = ax.get_ylim()
     x_center = (xlim[0] + xlim[1]) / 2
@@ -82,13 +86,6 @@ def zoom(event):
 # Initialize main Tkinter window
 root = tk.Tk()
 root.title("Coordinate Logger")
-
-def on_close():
-    root.quit()
-    root.destroy()
-    sys.exit()
-
-root.protocol("WM_DELETE_WINDOW", on_close)
 
 # Create Matplotlib figure
 fig, ax = plt.subplots()
@@ -105,8 +102,9 @@ listbox = Listbox(frame, yscrollcommand=scrollbar.set, width=30)
 listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 scrollbar.config(command=listbox.yview)
 
+# Save coordinates
 def save_coordinates():
-    local_folder = os.path.join(script_dir, "cords")
+    local_folder = "cords"
     os.makedirs(local_folder, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     file_path = os.path.join(local_folder, f"cords_{timestamp}.txt")
@@ -120,15 +118,7 @@ save_button.pack(side=tk.BOTTOM, pady=10)
 load_button = TkButton(root, text="Load Image", command=update_image)
 load_button.pack(side=tk.BOTTOM, pady=10)
 
-def on_hover(event):
-    if event.xdata is not None and event.ydata is not None and 'image' in globals():
-        x, y = int(event.xdata), int(event.ydata)
-        if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-            world_x, world_y = pixel_to_world(x, y, transform)
-            world_y = -world_y  # Flip Y coordinate
-            ax.set_title(f"World Coordinates: ({world_x:.2f}, {world_y:.2f})")
-            canvas.draw()
-
+# Enable interactive features
 cursor = Cursor(ax, useblit=True, color='red', linewidth=1)
 canvas.mpl_connect("motion_notify_event", on_hover)
 canvas.mpl_connect("button_press_event", on_click)
